@@ -1,19 +1,18 @@
 // backend/setupDb.js
-require('dotenv').config();
 const db = require('./db');
 const { v4: uuidv4 } = require('uuid');
 
-const setupDatabase = async () => {
+const initializeDatabase = async () => {
     console.log("Setting up PostgreSQL database...");
     const client = await db.getClient();
     try {
         await client.query('BEGIN');
 
-        // Drop existing tables to start fresh
+        // Drop existing tables to ensure a clean slate on setup
         await client.query('DROP TABLE IF EXISTS seats, shows, movies, users CASCADE;');
-        console.log('Dropped existing tables.');
+        console.log('Dropped existing tables (if any).');
 
-        // Create tables
+        // Create Users Table
         await client.query(`
             CREATE TABLE users (
                 id UUID PRIMARY KEY,
@@ -21,16 +20,25 @@ const setupDatabase = async () => {
                 password TEXT NOT NULL,
                 is_admin BOOLEAN DEFAULT FALSE
             );
+        `);
+        // Create Movies Table
+        await client.query(`
             CREATE TABLE movies (
                 id UUID PRIMARY KEY,
                 title TEXT NOT NULL,
                 poster_url TEXT
             );
+        `);
+        // Create Shows Table
+        await client.query(`
             CREATE TABLE shows (
                 id UUID PRIMARY KEY,
                 movie_id UUID REFERENCES movies(id) ON DELETE CASCADE,
                 show_time TIMESTAMPTZ NOT NULL
             );
+        `);
+        // Create Seats Table
+        await client.query(`
             CREATE TABLE seats (
                 id UUID PRIMARY KEY,
                 show_id UUID REFERENCES shows(id) ON DELETE CASCADE,
@@ -41,8 +49,8 @@ const setupDatabase = async () => {
             );
         `);
         console.log('Tables created successfully.');
-
-        // Seed data
+        
+        // Seed Movie and Show Data
         const movies = [
             { id: uuidv4(), title: 'Inception', posterUrl: 'https://i.imgur.com/SENiS3s.jpeg', shows: [{ id: uuidv4(), time: '2025-07-15 18:00:00' }] },
             { id: uuidv4(), title: 'The Dark Knight', posterUrl: 'https://i.imgur.com/S524s7s.jpeg', shows: [{ id: uuidv4(), time: '2025-07-15 19:30:00' }] },
@@ -65,11 +73,10 @@ const setupDatabase = async () => {
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Database setup failed:", e);
+        throw e; // Throw error to stop the process
     } finally {
         client.release();
     }
 };
 
-setupDatabase().then(() => {
-    console.log("Setup script finished.");
-});
+module.exports = { initializeDatabase };
