@@ -1,0 +1,112 @@
+/* frontend/src/SeatMap.css */
+.seat-map-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--surface-color-rgba);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  padding: 2rem;
+  border-radius: 12px;
+  max-width: fit-content;
+  margin: 2rem auto;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border-color-rgba);
+}
+.seat-map-container h2 {
+  margin-top: 0;
+}
+.seat-map-container h4 {
+  font-weight: 400;
+  color: #bdc3c7;
+  margin-top: -1rem;
+  margin-bottom: 2rem;
+}
+.seat-map {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 12px;
+  padding: 20px;
+  perspective: 600px;
+}
+.screen {
+  width: 80%;
+  height: 10px;
+  background-color: #f0f0f0;
+  margin-bottom: 3rem;
+  box-shadow: 0 5px 25px rgba(255, 255, 255, 0.3);
+  transform: rotateX(-45deg);
+  border-radius: 2px;
+  position: relative;
+  color: #2c3e50;
+  font-weight: 600;
+  font-size: 0.9em;
+  line-height: 20px;
+  text-align: center;
+}
+.screen::before {
+    content: 'SCREEN';
+    position: absolute;
+    top: -25px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #7f8c8d;
+    font-size: 0.9em;
+    font-weight: 600;
+    letter-spacing: 2px;
+}
+.seat {
+  width: 40px;
+  height: 35px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  border-radius: 7px 7px 2px 2px;
+  color: var(--white);
+  font-weight: 600;
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+  user-select: none;
+}
+.seat.available {
+  background: linear-gradient(to top, #3498db, #5dade2);
+}
+.seat.available:hover {
+  background: linear-gradient(to top, #4a00e0, #8e2de2);
+  transform: scale(1.15);
+}
+.seat.selected {
+  background: #f1c40f;
+  transform: scale(1.15);
+}
+.seat.booked {
+  background-color: #444;
+  cursor: not-allowed;
+}
+.legend {
+    display: flex;
+    justify-content: center;
+    margin-top: 2rem;
+    gap: 20px;
+}
+.legend > div {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.legend .seat {
+    width: 25px;
+    height: 22px;
+    cursor: default;
+}
+.legend .seat:hover {
+  transform: none;
+}
+.book-button {
+    margin-top: 2rem;
+    background: var(--accent-color);
+}
+.book-button:hover {
+    background: #d32f2f;
+}

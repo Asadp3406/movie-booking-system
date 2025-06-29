@@ -1,0 +1,28 @@
+/* frontend/src/index.css */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;700;900&display=swap');
+
+:root {
+  --primary-color: #f84464;
+  --secondary-color: #333545;
+  --background-color: #1a1a1a;
+  --surface-color-rgba: rgba(26, 26, 26, 0.7);
+  --border-color-rgba: rgba(255, 255, 255, 0.1);
+  --text-color: #ffffff;
+  --text-color-muted: #a0a0a0;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+body {
+  margin: 0;
+  font-family: 'Montserrat', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--background-color);
+  /* New, subtle background texture */
+  background-image: url('https://www.transparenttextures.com/patterns/dark-denim-3.png');
+  color: var(--text-color);
+}
+
+* {
+  box-sizing: border-box;
+}
