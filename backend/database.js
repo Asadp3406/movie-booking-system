@@ -1,26 +1,15 @@
 // backend/database.js
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
-// NEW: Import Node.js's built-in file system and path modules
-const fs = require('fs');
-const path = require('path');
+// We have removed the 'fs' and 'path' modules as they are no longer needed.
 
+// This line correctly uses the environment variable provided by Render.
 const DBSOURCE = process.env.DB_PATH || "db.sqlite";
-
-// --- NEW FIX ---
-// Before connecting, ensure the directory where the database will be stored exists.
-const dbDirectory = path.dirname(DBSOURCE);
-if (!fs.existsSync(dbDirectory)) {
-    // If the directory doesn't exist, create it recursively.
-    fs.mkdirSync(dbDirectory, { recursive: true });
-    console.log(`Database directory created at: ${dbDirectory}`);
-}
-// --- END FIX ---
-
 
 const db = new sqlite3.Database(DBSOURCE, (err) => {
     if (err) {
-        console.error(err.message);
+        // If there's an error here now, it's a different problem.
+        console.error("Error opening database:", err.message);
         throw err;
     } else {
         console.log('Connected to the SQLite database.');
@@ -28,7 +17,7 @@ const db = new sqlite3.Database(DBSOURCE, (err) => {
     }
 });
 
-// The rest of the file remains the same...
+// The rest of this file is exactly the same as before.
 function runSetup() {
     db.serialize(() => {
         console.log("Setting up database tables...");
