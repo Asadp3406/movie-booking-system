@@ -1,4 +1,5 @@
 // backend/index.js
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -6,216 +7,161 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const fs = require('fs');
-const { setupDatabase } = require('./setupDatabase.js');
-const dbPath = process.env.DB_PATH || "db.sqlite";
+const db = require('./db'); // NEW: Our new database pool file
 
-// --- Main Application Logic ---
 const app = express();
-let db; // We will initialize the database after checking if setup is needed
+app.use(cors());
+app.use(express.json());
 
-// --- Run Initialization and Start Server ---
-async function initialize() {
-    // Check if the database file exists.
-    const dbExists = fs.existsSync(dbPath);
+const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-key';
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-    if (!dbExists) {
-        console.log('Database not found. Running initial setup... This will take a moment.');
-        try {
-            await setupDatabase();
-            console.log('Database setup complete.');
-        } catch (setupError) {
-            console.error('CRITICAL: Database setup failed. Server will not start.', setupError);
-            process.exit(1); // Exit if DB setup fails
-        }
-    } else {
-        console.log('Database found. Skipping setup.');
+// --- Middlewares & WebSocket ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token == null) return res.sendStatus(401);
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) return res.sendStatus(403);
+        req.user = user;
+        next();
+    });
+};
+const verifyAdmin = (req, res, next) => {
+    if (req.user && req.user.isAdmin) next();
+    else res.sendStatus(403);
+};
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+const broadcast = (data) => wss.clients.forEach(c => c.readyState === WebSocket.OPEN && c.send(JSON.stringify(data)));
+wss.on('connection', ws => console.log('Client connected'));
+
+
+// --- API Routes (Rewritten for PostgreSQL) ---
+
+// AUTH
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const result = await db.query(
+            "INSERT INTO users (id, email, password) VALUES ($1, $2, $3) RETURNING id",
+            [uuidv4(), email, hashedPassword]
+        );
+        res.status(201).json({ message: "User created", userId: result.rows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Email may already be in use." });
     }
-    
-    // Now that setup is guaranteed to be complete, connect to the database for the app to use
-    const sqlite3 = require('sqlite3').verbose();
-    db = new sqlite3.Database(dbPath, (err) => {
-        if (err) {
-            console.error("CRITICAL: Error connecting to the database after setup.", err);
-            process.exit(1);
+});
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const result = await db.query("SELECT * FROM users WHERE email = $1", [email]);
+        const user = result.rows[0];
+        if (!user) return res.status(400).json({ error: "Cannot find user" });
+        if (await bcrypt.compare(password, user.password)) {
+            const accessToken = jwt.sign({ id: user.id, email: user.email, isAdmin: user.is_admin }, JWT_SECRET, { expiresIn: '1h' });
+            res.json({ accessToken });
+        } else {
+            res.status(403).json({ error: "Incorrect password" });
         }
-        console.log('Application connected to the database.');
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
 
-    // Start the server only after the database is ready
-    startServer();
-}
+// MOVIES & SHOWS
+app.get('/api/movies', async (req, res) => {
+    const result = await db.query("SELECT * FROM movies ORDER BY title");
+    res.json({ movies: result.rows });
+});
+app.get('/api/movies/:id', async (req, res) => {
+    const movieResult = await db.query("SELECT * FROM movies WHERE id = $1", [req.params.id]);
+    if (movieResult.rows.length === 0) return res.status(404).json({ error: "Movie not found" });
+    const showsResult = await db.query("SELECT id, show_time as \"showTime\" FROM shows WHERE movie_id = $1 ORDER BY show_time", [req.params.id]);
+    res.json({ movie: movieResult.rows[0], shows: showsResult.rows });
+});
+app.get('/api/shows/:id', async (req, res) => {
+    const showResult = await db.query(`
+        SELECT m.title as "movieTitle", s.show_time as "showTime" FROM shows s 
+        JOIN movies m ON s.movie_id = m.id WHERE s.id = $1`, [req.params.id]
+    );
+    if (showResult.rows.length === 0) return res.status(404).json({ error: "Show not found" });
+    const seatsResult = await db.query(`SELECT id as "seatId", seat_number as "seatNumber", status FROM seats WHERE show_id = $1 ORDER BY seat_number`, [req.params.id]);
+    res.json({ ...showResult.rows[0], seats: seatsResult.rows });
+});
 
-function startServer() {
-    app.use(cors());
-    app.use(express.json());
-    
-    const JWT_SECRET = 'your-super-secret-key-that-should-be-in-an-env-file';
+// BOOKING & PAYMENT
+app.post('/api/book', authenticateToken, async (req, res) => {
+    const { showId, seatNumbers } = req.body;
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+        const placeholders = seatNumbers.map((_, i) => `$${i + 2}`).join(',');
+        const checkSeatsRes = await client.query(`SELECT id FROM seats WHERE show_id = $1 AND seat_number IN (${placeholders}) AND status = 'available' FOR UPDATE`, [showId, ...seatNumbers]);
+        if (checkSeatsRes.rows.length !== seatNumbers.length) {
+            throw new Error('One or more seats are no longer available. Please select again.');
+        }
+        const updateSeatsRes = await client.query(`UPDATE seats SET status = 'booked', user_id = $1 WHERE show_id = $2 AND seat_number IN (${placeholders})`, [req.user.id, showId, ...seatNumbers]);
+        await client.query('COMMIT');
+        broadcast({ type: 'BOOKING_CONFIRMED', payload: { bookedSeats: seatNumbers } });
+        res.status(200).json({ message: 'Booking successful' });
+    } catch (e) {
+        await client.query('ROLLBACK');
+        res.status(409).json({ error: e.message });
+    } finally {
+        client.release();
+    }
+});
+app.post("/api/create-payment-intent", async (req, res) => {
+    const { numSeats } = req.body;
+    const paymentIntent = await stripe.paymentIntents.create({
+        amount: numSeats * 1250,
+        currency: "usd",
+        automatic_payment_methods: { enabled: true },
+    });
+    res.send({ clientSecret: paymentIntent.client_secret });
+});
 
-    // --- Middlewares & WebSocket ---
-    const authenticateToken = (req, res, next) => {
-        const authHeader = req.headers['authorization'];
-        const token = authHeader && authHeader.split(' ')[1];
-        if (token == null) return res.sendStatus(401);
-        jwt.verify(token, JWT_SECRET, (err, user) => {
-            if (err) return res.sendStatus(403);
-            req.user = user;
-            next();
-        });
-    };
-    const verifyAdmin = (req, res, next) => {
-        if (req.user && req.user.isAdmin) next();
-        else res.sendStatus(403);
-    };
-    const server = http.createServer(app);
-    const wss = new WebSocket.Server({ server });
-    const broadcast = (data) => {
-        wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(data));
-        });
-    };
-    wss.on('connection', ws => console.log('Client connected'));
+// ADMIN
+app.post('/api/admin/movies', authenticateToken, verifyAdmin, async (req, res) => {
+    const { title, posterUrl } = req.body;
+    await db.query(`INSERT INTO movies (id, title, poster_url) VALUES ($1, $2, $3)`, [uuidv4(), title, posterUrl]);
+    res.status(201).json({ message: "Movie created" });
+});
+app.post('/api/admin/shows', authenticateToken, verifyAdmin, async (req, res) => {
+    const { movieId, showTime } = req.body;
+    const showId = uuidv4();
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+        await client.query(`INSERT INTO shows (id, movie_id, show_time) VALUES ($1, $2, $3)`, [showId, movieId, showTime]);
+        const seatInserts = [];
+        const rows = ['A', 'B', 'C', 'D', 'E'];
+        for (let i = 0; i < 5; i++) {
+            for (let j = 1; j <= 8; j++) {
+                seatInserts.push(client.query(`INSERT INTO seats (id, show_id, seat_number, status) VALUES ($1, $2, $3, 'available')`, [uuidv4(), showId, `${rows[i]}${j}`]));
+            }
+        }
+        await Promise.all(seatInserts);
+        await client.query('COMMIT');
+        res.status(201).json({ message: "Show created successfully" });
+    } catch (e) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: 'Failed to create show' });
+    } finally {
+        client.release();
+    }
+});
+app.delete('/api/admin/movies/:id', authenticateToken, verifyAdmin, async (req, res) => {
+    // PostgreSQL handles cascade deletes via table schema, much cleaner!
+    await db.query("DELETE FROM movies WHERE id = $1", [req.params.id]);
+    res.status(200).json({ message: "Movie deleted successfully." });
+});
 
-    // --- All API Routes ---
-    app.post('/api/auth/register', async (req, res) => {
-        const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ error: "Email and password are required" });
-        try {
-            const hashedPassword = await bcrypt.hash(password, 10);
-            db.run(`INSERT INTO users (id, email, password) VALUES (?, ?, ?)`, [uuidv4(), email, hashedPassword], function(err) {
-                if (err) return res.status(400).json({ error: "Email already exists" });
-                res.status(201).json({ message: "User created successfully" });
-            });
-        } catch { res.status(500).send(); }
-    });
-    // ... all other routes (login, movies, shows, book, payment, admin) go here ...
-    // Note: They are unchanged, but must be inside this startServer function
-    // For brevity, I will show just one, but you should have all of them here.
-    app.post('/api/auth/login', (req, res) => {
-        const { email, password } = req.body;
-        db.get(`SELECT * FROM users WHERE email = ?`, [email], async (err, user) => {
-            if (user == null) return res.status(400).json({ error: "Cannot find user" });
-            try {
-                if (await bcrypt.compare(password, user.password)) {
-                    const accessToken = jwt.sign({ id: user.id, email: user.email, isAdmin: user.isAdmin }, JWT_SECRET, { expiresIn: '1h' });
-                    res.json({ accessToken: accessToken });
-                } else { res.status(403).json({ error: "Not Allowed" }); }
-            } catch { res.status(500).send(); }
-        });
-    });
-    app.get('/api/movies', (req, res) => {
-        db.all("SELECT * FROM movies ORDER BY title", [], (err, movies) => {
-            if (err) return res.status(500).json({ "error": err.message });
-            res.json({ movies });
-        });
-    });
-    app.get('/api/movies/:id', (req, res) => {
-        const movieId = req.params.id;
-        db.get("SELECT * FROM movies WHERE id = ?", [movieId], (err, movie) => {
-            if (err || !movie) return res.status(404).json({ "error": "Movie not found" });
-            db.all("SELECT id, showTime FROM shows WHERE movieId = ? ORDER BY showTime", [movieId], (err, shows) => {
-                if (err) return res.status(500).json({ "error": err.message });
-                res.json({ movie, shows });
-            });
-        });
-    });
-    app.get('/api/shows/:id', (req, res) => {
-        const showId = req.params.id;
-        db.get(`SELECT m.title as movieTitle, s.showTime FROM shows s JOIN movies m ON s.movieId = m.id WHERE s.id = ?`, [showId], (err, showDetails) => {
-            if (err || !showDetails) return res.status(500).json({ error: 'Could not fetch show details' });
-            db.all(`SELECT id as seatId, seatNumber, status FROM seats WHERE showId = ? ORDER BY seatNumber`, [showId], (err, seats) => {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json({ ...showDetails, seats: seats });
-            });
-        });
-    });
-    app.post('/api/book', authenticateToken, (req, res) => {
-        const { showId, seatNumbers } = req.body;
-        db.serialize(() => {
-            db.run('BEGIN IMMEDIATE TRANSACTION;');
-            const placeholders = seatNumbers.map(() => '?').join(',');
-            db.all(`SELECT * FROM seats WHERE showId = ? AND seatNumber IN (${placeholders}) AND status = 'available'`, [showId, ...seatNumbers], (err, availableSeats) => {
-                if (err || availableSeats.length !== seatNumbers.length) {
-                    db.run('ROLLBACK;');
-                    return res.status(409).json({ error: 'One or more seats are no longer available. Please select again.' });
-                }
-                db.run(`UPDATE seats SET status = 'booked', userId = ? WHERE showId = ? AND seatNumber IN (${placeholders})`, [req.user.id, showId, ...seatNumbers], function(err) {
-                    if (err) { db.run('ROLLBACK;'); return res.status(500).json({ error: 'Failed to book seats' }); }
-                    db.run('COMMIT;', (commitErr) => {
-                        if (commitErr) return res.status(500).json({ error: 'Failed to commit booking' });
-                        broadcast({ type: 'BOOKING_CONFIRMED', payload: { bookedSeats: seatNumbers } });
-                        res.status(200).json({ message: 'Booking successful' });
-                    });
-                });
-            });
-        });
-    });
-    app.post("/api/create-payment-intent", async (req, res) => {
-        const { numSeats } = req.body;
-        try {
-            const paymentIntent = await stripe.paymentIntents.create({
-                amount: numSeats * 1250,
-                currency: "usd",
-                automatic_payment_methods: { enabled: true },
-            });
-            res.send({ clientSecret: paymentIntent.client_secret });
-        } catch (e) { res.status(400).json({ error: { message: e.message }}); }
-    });
-    app.get('/api/admin/movies', authenticateToken, verifyAdmin, (req, res) => {
-        db.all("SELECT * FROM movies ORDER BY title", [], (err, rows) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ movies: rows });
-        });
-    });
-    app.post('/api/admin/movies', authenticateToken, verifyAdmin, (req, res) => {
-        const { title, posterUrl } = req.body;
-        if (!title || !posterUrl) return res.status(400).json({ error: "Title and Poster URL are required" });
-        db.run(`INSERT INTO movies (id, title, posterUrl) VALUES (?, ?, ?)`, [uuidv4(), title, posterUrl], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.status(201).json({ message: "Movie created" });
-        });
-    });
-    app.delete('/api/admin/movies/:id', authenticateToken, verifyAdmin, (req, res) => {
-        const movieId = req.params.id;
-        db.all("SELECT id FROM shows WHERE movieId = ?", [movieId], (err, shows) => {
-            if (err) return res.status(500).json({ error: "Error finding shows for movie." });
-            const showIds = shows.map(s => s.id);
-            const placeholders = showIds.map(() => '?').join(',');
-            db.serialize(() => {
-                db.run('BEGIN TRANSACTION;');
-                if (showIds.length > 0) db.run(`DELETE FROM seats WHERE showId IN (${placeholders})`, showIds);
-                db.run("DELETE FROM shows WHERE movieId = ?", [movieId]);
-                db.run("DELETE FROM movies WHERE id = ?", [movieId], (err) => {
-                    if(err) { db.run('ROLLBACK;'); return res.status(500).json({ error: "Failed to delete movie." });}
-                    db.run('COMMIT;');
-                    res.status(200).json({ message: "Movie and all associated shows deleted successfully." });
-                });
-            });
-        });
-    });
-    app.post('/api/admin/shows', authenticateToken, verifyAdmin, (req, res) => {
-        const { movieId, showTime } = req.body;
-        if (!movieId || !showTime) return res.status(400).json({ error: "Movie ID and Show Time are required" });
-        const showId = uuidv4();
-        db.serialize(() => {
-            db.run('BEGIN TRANSACTION;');
-            db.run(`INSERT INTO shows (id, movieId, showTime) VALUES (?, ?, ?)`, [showId, movieId, showTime], (err) => {
-                if (err) { db.run('ROLLBACK;'); return res.status(500).json({ error: "Failed to create show." }); }
-                const insertSeat = db.prepare(`INSERT INTO seats (id, showId, seatNumber, status) VALUES (?, ?, ?, ?)`);
-                const rows = ['A', 'B', 'C', 'D', 'E'];
-                for (let i = 0; i < 5; i++) { for (let j = 1; j <= 8; j++) { insertSeat.run(uuidv4(), showId, `${rows[i]}${j}`, 'available'); } }
-                insertSeat.finalize((err) => {
-                    if (err) { db.run('ROLLBACK;'); return res.status(500).json({ error: "Failed to create seats for the show." }); }
-                    db.run('COMMIT;');
-                    res.status(201).json({ message: "Show created successfully with all seats." });
-                });
-            });
-        });
-    });
-
-    const PORT = process.env.PORT || 8080;
-    server.listen(PORT, () => console.log(`Server is actively listening on port ${PORT}`));
-}
-
-// Start the application
-initialize();
+// --- Server Start ---
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => console.log(`Server is actively listening on port ${PORT}`));

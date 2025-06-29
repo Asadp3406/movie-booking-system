@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
   "start": "node index.js",
-  "build": "npm install && node database.js && node migrate.js"
+  "db:setup": "node setupDb.js",
+  "local": "npm run db:setup && nodemon index.js"
 },
   "keywords": [],
   "author": "",
@@ -16,6 +17,7 @@
     "dotenv": "^17.0.0",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
+    "pg": "^8.16.3",
     "sqlite3": "^5.1.7",
     "stripe": "^18.2.1",
     "uuid": "^11.1.0",
