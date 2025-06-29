@@ -1,8 +1,22 @@
 // backend/database.js
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
+// NEW: Import Node.js's built-in file system and path modules
+const fs = require('fs');
+const path = require('path');
 
 const DBSOURCE = process.env.DB_PATH || "db.sqlite";
+
+// --- NEW FIX ---
+// Before connecting, ensure the directory where the database will be stored exists.
+const dbDirectory = path.dirname(DBSOURCE);
+if (!fs.existsSync(dbDirectory)) {
+    // If the directory doesn't exist, create it recursively.
+    fs.mkdirSync(dbDirectory, { recursive: true });
+    console.log(`Database directory created at: ${dbDirectory}`);
+}
+// --- END FIX ---
+
 
 const db = new sqlite3.Database(DBSOURCE, (err) => {
     if (err) {
@@ -14,6 +28,7 @@ const db = new sqlite3.Database(DBSOURCE, (err) => {
     }
 });
 
+// The rest of the file remains the same...
 function runSetup() {
     db.serialize(() => {
         console.log("Setting up database tables...");
@@ -34,19 +49,18 @@ function runSetup() {
 }
 
 function seedData() {
-    // --- "Dune: Part Two" has been removed from this list ---
     const movies = [
-        { id: uuidv4(), title: 'Inception', posterUrl: 'https://m.media-amazon.com/images/I/912AErFSBHL._AC_UF894,1000_QL80_.jpg', shows: [{ id: uuidv4(), time: '2025-07-15 18:00:00' }, { id: uuidv4(), time: '2025-07-15 21:00:00' }] },
-        { id: uuidv4(), title: 'The Matrix', posterUrl: 'https://m.media-amazon.com/images/I/51EG732BV3L._AC_UF894,1000_QL80_.jpg', shows: [{ id: uuidv4(), time: '2025-07-15 19:00:00' }, { id: uuidv4(), time: '2025-07-15 22:00:00' }] }
+        { id: uuidv4(), title: 'Inception', posterUrl: 'https://i.imgur.com/SENiS3s.jpeg', shows: [{ id: uuidv4(), time: '2025-07-15 18:00:00' }, { id: uuidv4(), time: '2025-07-15 21:00:00' }] },
+        { id: uuidv4(), title: 'The Dark Knight', posterUrl: 'https://i.imgur.com/S524s7s.jpeg', shows: [{ id: uuidv4(), time: '2025-07-15 19:30:00' }, { id: uuidv4(), time: '2025-07-15 22:30:00' }] },
+        { id: uuidv4(), title: 'Interstellar', posterUrl: 'https://i.imgur.com/b653H51.jpeg', shows: [{ id: uuidv4(), time: '2025-07-16 17:00:00' }] },
+        { id: uuidv4(), title: 'The Matrix', posterUrl: 'https://i.imgur.com/k2G3Y22.jpeg', shows: [{ id: uuidv4(), time: '2025-07-16 21:00:00' }] }
     ];
-
     db.get("SELECT COUNT(*) as count FROM movies", [], (err, row) => {
         if (row && row.count === 0) {
             console.log("Seeding data...");
             const insertMovie = db.prepare(`INSERT INTO movies (id, title, posterUrl) VALUES (?, ?, ?)`);
             const insertShow = db.prepare(`INSERT INTO shows (id, movieId, showTime) VALUES (?, ?, ?)`);
             const insertSeat = db.prepare(`INSERT INTO seats (id, showId, seatNumber, status) VALUES (?, ?, ?, ?)`);
-
             db.serialize(() => {
                 movies.forEach(movie => {
                     insertMovie.run(movie.id, movie.title, movie.posterUrl);
@@ -61,7 +75,6 @@ function seedData() {
                         }
                     });
                 });
-
                 insertMovie.finalize();
                 insertShow.finalize();
                 insertSeat.finalize(err => {
@@ -74,5 +87,4 @@ function seedData() {
         }
     });
 }
-
 module.exports = db;
